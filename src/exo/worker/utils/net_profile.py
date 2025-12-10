@@ -1,4 +1,5 @@
 import socket
+from ipaddress import ip_address
 
 from anyio import create_task_group, to_thread
 
@@ -27,13 +28,23 @@ async def check_reachability(
         out[target_node_id].add(target_ip)
 
 
-async def check_reachable(topology: Topology) -> dict[NodeId, set[str]]:
+async def check_reachable(our_node_id: NodeId, topology: Topology) -> dict[NodeId, set[str]]:
     reachable: dict[NodeId, set[str]] = {}
+    our_profile = topology.get_node_profile(our_node_id)
+    if our_profile is None:
+        return {}
+    our_interfaces = our_profile.network_interfaces
     async with create_task_group() as tg:
         for node in topology.list_nodes():
-            if not node.node_profile:
+            if node.node_id == our_node_id or node.node_profile is None:
                 continue
             for iface in node.node_profile.network_interfaces:
+                if ip_address(iface.ip_address).is_loopback:
+                    # Definitely a loopback address
+                    continue
+                if iface in our_interfaces:
+                    # Skip duplicates with our own interfaces
+                    continue
                 tg.start_soon(
                     check_reachability, iface.ip_address, node.node_id, reachable
                 )
