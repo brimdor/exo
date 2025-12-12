@@ -4,7 +4,7 @@ import shutil
 import time
 import traceback
 from datetime import timedelta
-from typing import Callable, Literal, cast
+from typing import Literal, cast
 from urllib.parse import urljoin
 
 import anyio
@@ -20,6 +20,7 @@ from pydantic import (
     TypeAdapter,
 )
 
+from exo.utils.channels import Sender, Receiver, channel
 from exo.shared.constants import EXO_HOME, EXO_MODELS_DIR
 from exo.shared.types.memory import Memory
 from exo.shared.types.worker.downloads import DownloadProgressData
@@ -320,13 +321,13 @@ async def download_file_with_retry(
     revision: str,
     path: str,
     target_dir: Path,
-    on_progress: Callable[[int, int, bool], None] = lambda _, __, ___: None,
+    progress_sender: Sender[tuple[int, int, bool]] | None
 ) -> Path:
     n_attempts = 30
     for attempt in range(n_attempts):
         try:
             return await _download_file(
-                repo_id, revision, path, target_dir, on_progress
+                repo_id, revision, path, target_dir, progress_sender
             )
         except Exception as e:
             if isinstance(e, FileNotFoundError) or attempt == n_attempts - 1:
@@ -346,7 +347,7 @@ async def _download_file(
     revision: str,
     path: str,
     target_dir: Path,
-    on_progress: Callable[[int, int, bool], None] = lambda _, __, ___: None,
+    progress_sender: Sender[tuple[int, int, bool]] | None,
 ) -> Path:
     if await (target_dir / path).exists():
         return target_dir / path
@@ -375,7 +376,8 @@ async def _download_file(
             async with await partial_path.open("ab" if resume_byte_pos else "wb") as f:
                 async for chunk in r.aiter_bytes(8 * 1024 * 1024):
                     n_read = n_read + (await f.write(chunk))
-                    on_progress(n_read, length, False)
+                    if progress_sender is not None:
+                        await progress_sender.send((n_read, length, False))
 
     final_hash = await calc_hash(
         partial_path, hash_type="sha256" if len(remote_hash) == 64 else "sha1"
@@ -390,7 +392,8 @@ async def _download_file(
             f"Downloaded file {target_dir / path} has hash {final_hash} but remote hash is {remote_hash}"
         )
     await partial_path.rename(target_dir / path)
-    on_progress(length, length, True)
+    if progress_sender is not None:
+        await progress_sender.send((length, length, True))
     return target_dir / path
 
 
@@ -448,7 +451,7 @@ async def get_weight_map(repo_id: str, revision: str = "main") -> dict[str, str]
     target_dir = (await ensure_models_dir()) / str(repo_id).replace("/", "--")
     await (target_dir).mkdir(parents=True, exist_ok=True)
     index_file = await download_file_with_retry(
-        repo_id, revision, "model.safetensors.index.json", target_dir
+        repo_id, revision, "model.safetensors.index.json", target_dir, None
     )
     async with await index_file.open("r") as f:
         index_data = ModelSafetensorsIndex.model_validate_json(await f.read())
@@ -521,9 +524,10 @@ async def download_progress_for_local_path(
     )
 
 
+# this function still has disgusting amounts of currying, but its better
 async def download_shard(
     shard: ShardMetadata,
-    on_progress: Callable[[ShardMetadata, RepoDownloadProgress], None],
+    progress_sender: Sender[RepoDownloadProgress],
     max_parallel_downloads: int = 8,
     skip_download: bool = False,
     allow_patterns: list[str] | None = None,
@@ -564,9 +568,16 @@ async def download_shard(
     )
     file_progress: dict[str, RepoFileDownloadProgress] = {}
 
+    async def huh(
+        file: FileListEntry, recv: Receiver[tuple[int, int, bool]]
+    ):
+        async with recv:
+            async for curr, total, done in recv:
+                await progress_sender.send(on_progress_wrapper(file, curr, total, done))
+
     def on_progress_wrapper(
         file: FileListEntry, curr_bytes: int, total_bytes: int, is_renamed: bool
-    ):
+    ) -> RepoDownloadProgress:
         start_time = (
             file_progress[file.path].start_time
             if file.path in file_progress
@@ -602,15 +613,14 @@ async def download_shard(
             else "in_progress",
             start_time=start_time,
         )
-        on_progress(
-            shard,
+        return (
             calculate_repo_progress(
                 shard,
                 str(shard.model_meta.model_id),
                 revision,
                 file_progress,
                 all_start_time,
-            ),
+            )
         )
 
     for file in filtered_file_list:
@@ -630,27 +640,27 @@ async def download_shard(
 
     semaphore = anyio.Semaphore(max_parallel_downloads)
 
-    async def download_with_semaphore(file: FileListEntry):
+    async def download_with_semaphore(file: FileListEntry, sender: Sender[tuple[int, int, bool]]):
         async with semaphore:
             await download_file_with_retry(
                 str(shard.model_meta.model_id),
                 revision,
                 file.path,
                 target_dir,
-                lambda curr_bytes, total_bytes, is_renamed: on_progress_wrapper(
-                    file, curr_bytes, total_bytes, is_renamed
-                ),
+                sender,
             )
 
     if not skip_download:
         async with anyio.create_task_group() as tg:
             for file in filtered_file_list:
-                tg.start_soon(download_with_semaphore, file)
+                send, recv = channel[tuple[int,int,bool]](1)
+                tg.start_soon(download_with_semaphore, file, send)
+                tg.start_soon(huh, file, recv)
 
     final_repo_progress = calculate_repo_progress(
         shard, str(shard.model_meta.model_id), revision, file_progress, all_start_time
     )
-    on_progress(shard, final_repo_progress)
+    await progress_sender.send(final_repo_progress)
     if gguf := next((f for f in filtered_file_list if f.path.endswith(".gguf")), None):
         return target_dir / gguf.path, final_repo_progress
     else:

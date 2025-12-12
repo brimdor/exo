@@ -36,6 +36,9 @@ class Sender[T](AnyioSender[T]):
             raise ClosedResourceError
         return Receiver(_state=self._state)
 
+    def __enter__(self) -> Self:
+        return self
+
 
 class Receiver[T](AnyioReceiver[T]):
     def clone(self) -> "Receiver[T]":

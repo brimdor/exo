@@ -1,9 +1,11 @@
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import timedelta
-from typing import AsyncIterator, Callable
+from typing import AsyncIterator, Callable, Self
 
-from anyio import Path
+import anyio
+from anyio import Path, create_task_group
+from anyio.abc import TaskGroup, CancelScope
 
 from exo.shared.types.memory import Memory
 from exo.shared.types.models import ModelId, ModelMetadata
@@ -11,15 +13,58 @@ from exo.shared.types.worker.shards import (
     PipelineShardMetadata,
     ShardMetadata,
 )
-from exo.utils.channels import Sender
-from exo.worker.download.download_utils import RepoDownloadProgress
+from exo.utils.channels import Sender, Receiver, channel
+from exo.worker.download.download_utils import RepoDownloadProgress, download_shard
 
 
 @dataclass
 class ShardDownloader2:
     progress_sender: Sender[RepoDownloadProgress]
+    max_parallel_downloads=8
 
-    def queue_shard(self, shard: ShardMetadata, config_only: bool = False): ...
+    # The last item on the shard stack is currently being downloaded
+    shard_stack: list[tuple[ShardMetadata, bool]] = field(init=False, default_factory = list)
+    _top_scope: CancelScope | None = field(init=False, default=None)
+    _tg: TaskGroup = field(init=False, default_factory=create_task_group)
+
+    def start_shard(self, shard: ShardMetadata, config_only: bool = False):
+        self.shard_stack.append((shard, config_only))
+        # Cancel current tasks
+        if self._top_scope:
+            self._top_scope.cancel()
+        # Create a new scope
+        self._top_scope = CancelScope()
+
+
+
+    async def run(self):
+        async with self._tg as tg:
+            await anyio.sleep_forever()
+
+
+    def shutdown(self):
+        self.progress_sender.close()
+        self._tg.cancel_scope.cancel()
+
+    async def _new_download(self, scope: CancelScope):
+        (shard, config_only) = self.shard_stack[-1]
+        with self.progress_sender.clone() as send, scope:
+            allow_patterns = ["config.json"] if config_only else None
+            target_dir, _ = await download_shard(
+                shard,
+                send,
+                max_parallel_downloads=self.max_parallel_downloads,
+                allow_patterns=allow_patterns,
+            )
+            return target_dir
+
+
+
+
+    @classmethod
+    def default(cls) -> tuple[Self, Receiver[RepoDownloadProgress]]:
+        send, recv = channel[RepoDownloadProgress](10)
+        return cls(send), recv
 
 
 # TODO: the PipelineShardMetadata getting reinstantiated is a bit messy. Shoudl this be a classmethod?
