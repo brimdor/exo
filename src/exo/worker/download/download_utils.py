@@ -30,7 +30,7 @@ from exo.shared.types.worker.downloads import DownloadProgressData
 from exo.shared.types.worker.shards import ShardMetadata
 from exo.worker.download.huggingface_utils import (
     filter_repo_objects,
-    get_allow_patterns,
+    # get_allow_patterns,
     get_auth_headers,
     get_hf_endpoint,
 )
@@ -450,13 +450,15 @@ async def get_weight_map(repo_id: str, revision: str = "main") -> dict[str, str]
 
 
 async def resolve_allow_patterns(shard: ShardMetadata) -> list[str]:
-    try:
-        weight_map = await get_weight_map(str(shard.model_meta.model_id))
-        return get_allow_patterns(weight_map, shard)
-    except Exception:
-        logger.error(f"Error getting weight map for {shard.model_meta.model_id=}")
-        logger.error(traceback.format_exc())
-        return ["*"]
+    logger.info("Resolving allow patterns to wildcard.")
+    return ["*"]
+    # try:
+    #     weight_map = await get_weight_map(str(shard.model_meta.model_id))
+    #     return get_allow_patterns(weight_map, shard)
+    # except Exception:
+    #     logger.error(f"Error getting weight map for {shard.model_meta.model_id=}")
+    #     logger.error(traceback.format_exc())
+    #     return ["*"]
 
 
 async def get_downloaded_size(path: Path) -> int:
