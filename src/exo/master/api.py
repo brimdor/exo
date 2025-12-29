@@ -5,9 +5,9 @@ from typing import cast
 import anyio
 from anyio import create_task_group
 from anyio.abc import TaskGroup
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from hypercorn.asyncio import serve  # pyright: ignore[reportUnknownVariableType]
 from hypercorn.config import Config
@@ -120,6 +120,17 @@ class API:
         self.paused_ev: anyio.Event = anyio.Event()
 
         self.app = FastAPI()
+
+        @self.app.middleware("http")
+        async def check_master_access(request: Request, call_next):
+            if self.node_id != self.session_id.master_node_id:
+                return JSONResponse(
+                    status_code=403,
+                    content={
+                        "detail": "WebUI and API are only available on the Master Node. Please connect to the Master Node to access the interface."
+                    },
+                )
+            return await call_next(request)
         self._setup_cors()
         self._setup_routes()
 
