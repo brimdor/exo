@@ -2,6 +2,8 @@ use crate::alias;
 use crate::swarm::transport::tcp_transport;
 pub use behaviour::{Behaviour, BehaviourEvent};
 use libp2p::{SwarmBuilder, identity};
+use std::env;
+use tracing::info;
 
 pub type Swarm = libp2p::Swarm<Behaviour>;
 
@@ -15,7 +17,10 @@ pub type Swarm = libp2p::Swarm<Behaviour>;
 pub const NETWORK_VERSION: &[u8] = b"v0.0.1";
 pub const OVERRIDE_VERSION_ENV_VAR: &str = "EXO_LIBP2P_NAMESPACE";
 
-/// Create and configure a swarm which listens to all ports on OS
+/// Environment variable to configure the libp2p listening port (for Kubernetes DNS discovery)
+pub const LIBP2P_PORT_ENV_VAR: &str = "EXO_LIBP2P_PORT";
+
+/// Create and configure a swarm which listens to all interfaces on configurable port
 pub fn create_swarm(keypair: identity::Keypair) -> alias::AnyResult<Swarm> {
     let mut swarm = SwarmBuilder::with_existing_identity(keypair)
         .with_tokio()
@@ -23,8 +28,16 @@ pub fn create_swarm(keypair: identity::Keypair) -> alias::AnyResult<Swarm> {
         .with_behaviour(Behaviour::new)?
         .build();
 
-    // Listen on all interfaces and whatever port the OS assigns
-    swarm.listen_on("/ip4/0.0.0.0/tcp/0".parse()?)?;
+    // Get port from environment variable, default to 0 (OS-assigned) for backward compatibility
+    let port = env::var(LIBP2P_PORT_ENV_VAR)
+        .ok()
+        .and_then(|s| s.parse::<u16>().ok())
+        .unwrap_or(0);
+
+    let listen_addr = format!("/ip4/0.0.0.0/tcp/{}", port);
+    info!("libp2p listening on: {}", listen_addr);
+
+    swarm.listen_on(listen_addr.parse()?)?;
     Ok(swarm)
 }
 
