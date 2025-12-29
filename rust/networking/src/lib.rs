@@ -15,6 +15,7 @@
 // #![feature(negative_impls)]
 
 pub mod discovery;
+pub mod dns_discovery;
 pub mod keep_alive;
 pub mod swarm;
 

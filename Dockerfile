@@ -1,0 +1,52 @@
+# Exo Dockerfile - Run your own AI cluster
+# Build: docker build -t docker.io/brimdor/exo:latest .
+# Based on exo-explore/exo installation instructions
+
+FROM python:3.12-slim
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git \
+    curl \
+    build-essential \
+    nodejs \
+    npm \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install uv (Python package manager)
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+ENV PATH="/root/.local/bin:$PATH"
+
+# Install Rust (required for some dependencies)
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+ENV PATH="/root/.cargo/bin:$PATH"
+RUN rustup toolchain install nightly
+
+WORKDIR /app
+
+# Copy the local exo source
+COPY . .
+
+# Build dashboard
+WORKDIR /app/dashboard
+RUN npm install && npm run build
+
+WORKDIR /app
+
+# Pre-install all Python dependencies during build (not at runtime!)
+# This creates the .venv and installs everything
+RUN uv sync --frozen || uv sync
+
+# Create data directory for models
+RUN mkdir -p /data/models
+
+# Expose API/Dashboard port
+EXPOSE 52415
+
+# Environment variables for Kubernetes discovery
+ENV EXO_LISTEN_PORT=52415
+ENV EXO_DATA_DIR=/data/models
+
+# Run using the pre-built venv - no syncing at runtime
+ENTRYPOINT ["uv", "run", "--no-sync", "exo"]
+CMD ["--api-port", "52415"]

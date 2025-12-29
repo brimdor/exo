@@ -39,6 +39,7 @@ keccak-const = { workspace = true }
 
 # tracing/logging
 log = { workspace = true }
+tracing = "0.1"
 
 # networking
 libp2p = { workspace = true, features = ["full"] }

@@ -1,3 +1,4 @@
+use crate::dns_discovery::{DnsDiscoveryState, is_dns_discovery_enabled};
 use crate::ext::MultiaddrExt;
 use crate::keep_alive;
 use delegate::delegate;
@@ -20,6 +21,7 @@ use std::io;
 use std::net::IpAddr;
 use std::task::{Context, Poll};
 use std::time::Duration;
+use tracing::info;
 use util::wakerdeque::WakerDeque;
 
 const RETRY_CONNECT_INTERVAL: Duration = Duration::from_secs(5);
@@ -110,15 +112,32 @@ pub struct Behaviour {
 
     // pending events to emmit => waker-backed Deque to control polling
     pending_events: WakerDeque<ToSwarm<Event, Infallible>>,
+
+    // DNS-based discovery for Kubernetes environments
+    dns_state: DnsDiscoveryState,
 }
 
 impl Behaviour {
     pub fn new(keypair: &identity::Keypair) -> io::Result<Self> {
+        let mut dns_state = DnsDiscoveryState::new();
+        if dns_state.is_enabled() {
+            info!("DNS discovery mode enabled");
+            dns_state.init_delay();
+        }
+
         Ok(Self {
             managed: managed::Behaviour::new(keypair)?,
             mdns_discovered: HashMap::new(),
             retry_delay: Delay::new(RETRY_CONNECT_INTERVAL),
             pending_events: WakerDeque::new(),
+            dns_state,
+        })
+    }
+
+    /// Dial a peer by multiaddress without requiring a peer ID
+    fn dial_addr(&mut self, addr: Multiaddr) {
+        self.pending_events.push_back(ToSwarm::Dial {
+            opts: DialOpts::unknown_peer_id().address(addr).build(),
         })
     }
 
@@ -370,6 +389,29 @@ impl NetworkBehaviour for Behaviour {
                 }
             }
             self.retry_delay.reset(RETRY_CONNECT_INTERVAL) // reset timeout
+        }
+
+        // DNS-based discovery polling for Kubernetes environments
+        if self.dns_state.is_enabled() {
+            if let Some(ref mut delay) = self.dns_state.take_delay() {
+                if delay.poll_unpin(cx).is_ready() {
+                    // Resolve DNS and dial any new peers
+                    let new_peers = self.dns_state.resolve_peers();
+                    for (ip, port) in new_peers {
+                        let addr = DnsDiscoveryState::ip_to_multiaddr(ip, port);
+                        info!("DNS discovery: dialing new peer at {}", addr);
+                        self.dial_addr(addr);
+                    }
+
+                    // Also retry all known peers
+                    for addr in self.dns_state.get_all_peer_addrs() {
+                        self.dial_addr(addr);
+                    }
+
+                    self.dns_state.reset_delay();
+                    cx.waker().wake_by_ref();
+                }
+            }
         }
 
         // send out any pending events from our own service
